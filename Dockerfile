@@ -16,7 +16,8 @@ ARG CUDA_ARCH=90
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git cmake ninja-build build-essential ca-certificates libcurl4-openssl-dev \
+      git cmake ninja-build build-essential ca-certificates \
+      libcurl4-openssl-dev libssl-dev \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -31,6 +32,7 @@ RUN cmake -B build -G Ninja \
       -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} \
       -DGGML_NATIVE=OFF \
       -DLLAMA_CURL=ON \
+      -DLLAMA_OPENSSL=ON \
   && cmake --build build --config Release -j 2 --target llama-server \
   && ls -la build/bin/
 
@@ -42,7 +44,7 @@ ENV PYTHONUNBUFFERED=1 \
     LD_LIBRARY_PATH=/app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-pip libgomp1 libcurl4 curl bash ca-certificates \
+      python3 python3-pip libgomp1 libcurl4 libssl3 openssl curl bash ca-certificates \
   && ln -sf /usr/bin/python3 /usr/bin/python \
   && rm -rf /var/lib/apt/lists/*
 
