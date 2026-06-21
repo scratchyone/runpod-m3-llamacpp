@@ -25,6 +25,13 @@ RUN git clone --depth 1 --branch ${LLAMA_BRANCH} ${LLAMA_REPO} .
 
 # Static build -> llama-server is self-contained except for system CUDA libs
 # (cuBLAS/cudart), which are provided by the runtime image below.
+# GGML_SCHED_MAX_SPLIT_INPUTS: fixed-size array bound for distinct graph-input
+# tensors copied across GPU split boundaries when pipeline parallelism is active
+# (n_copies > 1, i.e. multi-GPU --split-mode layer). Default 30 (guarded by
+# #ifndef in ggml/src/ggml-backend.cpp) overflows for DeepSeek-V4-Flash's MoE
+# graph across 5 GPUs -> GGML_ASSERT(n_graph_inputs < ...) SIGABRT at load.
+# Bump it via a compile define; arrays are just pointers so the cost is trivial.
+ARG GGML_MAX_SPLIT_INPUTS=128
 RUN cmake -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=OFF \
@@ -33,6 +40,8 @@ RUN cmake -B build -G Ninja \
       -DGGML_NATIVE=OFF \
       -DLLAMA_CURL=ON \
       -DLLAMA_OPENSSL=ON \
+      -DCMAKE_C_FLAGS="-DGGML_SCHED_MAX_SPLIT_INPUTS=${GGML_MAX_SPLIT_INPUTS}" \
+      -DCMAKE_CXX_FLAGS="-DGGML_SCHED_MAX_SPLIT_INPUTS=${GGML_MAX_SPLIT_INPUTS}" \
   && cmake --build build --config Release -j 2 --target llama-server \
   && ls -la build/bin/
 
