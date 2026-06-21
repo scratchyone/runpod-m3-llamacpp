@@ -1,3 +1,4 @@
+import json
 import os
 from functools import lru_cache
 
@@ -56,6 +57,38 @@ def response_to_dict(response):
     if hasattr(response, "model_dump"):
         return response.model_dump()
     return response
+
+
+# Keys RunPod's /openai SSE decoder tolerates in a ChatCompletionChunk /
+# Completion chunk. Anything else (e.g. llama-server's "--verbose"
+# "__verbose" key) is stripped so the gateway can decode the chunk.
+_CHUNK_ALLOWED_KEYS = {
+    "id",
+    "object",
+    "created",
+    "model",
+    "choices",
+    "system_fingerprint",
+    "usage",
+    "service_tier",
+}
+
+
+def chunk_to_sse(chunk):
+    """Format an OpenAI streaming chunk as a raw SSE string.
+
+    RunPod's /openai compatibility layer relays whatever the worker yields
+    verbatim as the SSE body, so each item MUST already be a
+    'data: <json>\\n\\n' string (RAW_OPENAI_OUTPUT behaviour in worker-vllm).
+    Yielding a dict instead produces "Error decoding stream response".
+    """
+    data = response_to_dict(chunk)
+    if isinstance(data, dict):
+        data = {k: v for k, v in data.items() if k in _CHUNK_ALLOWED_KEYS}
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    else:
+        payload = str(data)
+    return f"data: {payload}\n\n"
 
 
 class LlamaCPPEngine:
@@ -144,13 +177,15 @@ class LlamaCPPOpenAIEngine:
                 yield response_to_dict(response)
                 return
 
+            # Streaming: RunPod's /openai layer forwards each yielded item
+            # verbatim as the SSE body, so every item must be a raw
+            # 'data: <json>\n\n' string (matches worker-vllm RAW_OPENAI_OUTPUT=1).
+            # Yielding dicts here is what caused "Error decoding stream response".
             for chunk in response:
-                yield response_to_dict(chunk)
+                yield chunk_to_sse(chunk)
 
-            # NOTE: do NOT yield a {"done": True} terminator here. RunPod's
-            # /openai SSE layer can't decode a chunk without "choices" and
-            # returns "Error decoding stream response"; it appends its own
-            # [DONE]. (Native /run streaming relies on job status, not this.)
+            # Terminal sentinel, exactly as the OpenAI SSE spec / worker-vllm emit.
+            yield "data: [DONE]\n\n"
 
         except Exception as e:
             yield {"error": str(e)}
