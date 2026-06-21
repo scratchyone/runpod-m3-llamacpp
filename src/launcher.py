@@ -3,8 +3,9 @@ import shlex
 import signal
 import subprocess
 import sys
-import threading
 import time
+import urllib.error
+import urllib.request
 
 from find_cached import CACHE_DIR, find_model_path
 
@@ -68,7 +69,7 @@ def build_llama_args():
         model_path = resolve_cached_file(cached_model, cached_gguf_path, cache_dir, "cached model")
         argv.extend(["-m", model_path])
     else:
-        print("launcher.py: WARNING: Caching is disabled. Startup may download the model every run.")
+        print("launcher.py: Launcher cached-model mode off; using llama.cpp's own download cache (LLAMA_CACHE) on the volume. First start downloads; later starts reuse it.")
 
     mmproj_sources = [
         bool(env("LLAMA_CACHED_MMPROJ_PATH")),
@@ -110,25 +111,35 @@ def start_handler(handler_args):
     return subprocess.call([sys.executable, "-u", "handler.py", *handler_args])
 
 
-def stream_server_logs(process, log, ready_event):
-    for line in process.stdout:
-        print(line, end="")
-        log.write(line)
-        log.flush()
-        if "listening" in line:
-            ready_event.set()
-
-
-def wait_for_ready(process, ready_event, timeout_seconds):
-    deadline = time.monotonic() + timeout_seconds
+def wait_for_ready_http(process, port, timeout_seconds):
+    """Poll llama.cpp's /health until ready. llama-server writes straight to the
+    container stdout/stderr, so its logs (including the download progress bar)
+    show up natively in the RunPod console instead of being scraped here."""
+    url = f"http://127.0.0.1:{port}/health"
+    start = time.monotonic()
+    deadline = start + timeout_seconds
+    last_note = 0.0
     while time.monotonic() < deadline:
-        if ready_event.is_set():
-            return
         if process.poll() is not None:
             raise RuntimeError(f"llama-server exited early with code {process.returncode}.")
-        print("launcher.py: Checking if llama-server is done initializing...")
-        time.sleep(0.5)
-    raise RuntimeError(f"llama-server did not start within {timeout_seconds} seconds.")
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if resp.status == 200:
+                    return
+        except Exception:
+            # connection refused (still downloading / port not bound) or
+            # HTTP 503 "loading model" -> keep waiting.
+            pass
+        now = time.monotonic()
+        if now - last_note >= 20:
+            print(
+                f"launcher.py: waiting for llama-server "
+                f"(downloading/loading model, ~{int((now - start) // 60)} min elapsed)...",
+                flush=True,
+            )
+            last_note = now
+        time.sleep(3)
+    raise RuntimeError(f"llama-server did not become ready within {timeout_seconds} seconds.")
 
 
 def main():
@@ -146,44 +157,32 @@ def main():
 
     env_vars = os.environ.copy()
     env_vars["LD_LIBRARY_PATH"] = "/app"
-    with open(LOG_PATH, "w", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env_vars,
-        )
-        ready_event = threading.Event()
-        log_thread = threading.Thread(
-            target=stream_server_logs,
-            args=(process, log, ready_event),
-            daemon=True,
-        )
-        log_thread.start()
+    # Inherit stdout/stderr so llama-server output (including the \r download
+    # progress bar) streams natively to the container log / RunPod console.
+    # Readiness is detected via the /health endpoint, not by scraping logs.
+    process = subprocess.Popen(command, env=env_vars)
 
-        def cleanup(signum, _frame):
-            print("launcher.py: Cleaning up...")
-            process.terminate()
-            raise SystemExit(128 + signum)
+    def cleanup(signum, _frame):
+        print("launcher.py: Cleaning up...")
+        process.terminate()
+        raise SystemExit(128 + signum)
 
-        signal.signal(signal.SIGINT, cleanup)
-        signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
 
+    try:
+        wait_for_ready_http(process, LLAMA_PORT, timeout_seconds)
+        print("launcher.py: llama-server is ready, delegating to the handler script.")
+        return start_handler(sys.argv[1:])
+    except Exception as exc:
+        print(f"launcher.py: Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        process.terminate()
         try:
-            wait_for_ready(process, ready_event, timeout_seconds)
-            print("launcher.py: llama-server is up and running, delegating to the handler script.")
-            return start_handler(sys.argv[1:])
-        except Exception as exc:
-            print(f"launcher.py: Error: {exc}", file=sys.stderr)
-            return 1
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
 
 
 if __name__ == "__main__":
