@@ -147,7 +147,10 @@ class LlamaCPPOpenAIEngine:
             for chunk in response:
                 yield response_to_dict(chunk)
 
-            yield {"done": True}
+            # NOTE: do NOT yield a {"done": True} terminator here. RunPod's
+            # /openai SSE layer can't decode a chunk without "choices" and
+            # returns "Error decoding stream response"; it appends its own
+            # [DONE]. (Native /run streaming relies on job status, not this.)
 
         except Exception as e:
             yield {"error": str(e)}
