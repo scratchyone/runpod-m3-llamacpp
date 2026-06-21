@@ -1,0 +1,7 @@
+# nothing build-secret lives here; keep the repo clean
+*.gguf
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+.env
