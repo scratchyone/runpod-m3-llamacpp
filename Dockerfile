@@ -9,8 +9,8 @@
 ######################## Builder: compile llama-server (CUDA) ########################
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
 
-ARG LLAMA_REPO=https://github.com/danielhanchen/llama.cpp.git
-ARG LLAMA_BRANCH=minimax-m3
+ARG LLAMA_REPO=https://github.com/antirez/llama.cpp-deepseek-v4-flash.git
+ARG LLAMA_BRANCH=main
 # H100 = compute capability 9.0; single arch keeps the CUDA compile fast.
 ARG CUDA_ARCH=90
 
